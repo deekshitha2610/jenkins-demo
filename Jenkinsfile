@@ -4,14 +4,33 @@ pipeline {
     stages {
         stage('Build') {
             steps {
-                echo 'Compiling Java program...'
-                bat 'javac Hello.java'
+                echo 'Building...'
+                sh 'javac Hello.java'
             }
         }
-        stage('Run') {
+
+        stage('Test') {
             steps {
-                echo 'Running Java program...'
-                bat 'java Hello'
+                echo 'Testing...'
+                sh 'java Hello'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying to AWS EC2...'
+                sshPublisher(publishers: [
+                    sshPublisherDesc(
+                        configName: 'aws-ec2',
+                        transfers: [
+                            sshTransfer(
+                                sourceFiles: 'Hello.class',
+                                remoteDirectory: '/home/ec2-user/app',
+                                execCommand: 'java Hello'
+                            )
+                        ]
+                    )
+                ])
             }
         }
     }
