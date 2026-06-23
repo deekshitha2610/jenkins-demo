@@ -2,35 +2,56 @@ pipeline {
     agent any
 
     stages {
-        stage('Build') {
+        stage('Checkout') {
             steps {
-                echo 'Building...'
-                sh 'javac Hello.java'
+                // Pull code from GitHub
+                checkout scm
             }
         }
 
-        stage('Test') {
+        stage('Build Java App') {
             steps {
-                echo 'Testing...'
-                sh 'java Hello'
+                script {
+                    // Compile your Hello.java program
+                    sh 'javac Hello.java'
+                }
             }
         }
 
-        stage('Deploy') {
+        stage('Build Docker Image') {
             steps {
-                echo 'Deploying to AWS EC2...'
-                sshPublisher(publishers: [
-                    sshPublisherDesc(
-                        configName: 'aws-ec2',
-                        transfers: [
-                            sshTransfer(
-                                sourceFiles: 'Hello.class',
-                                remoteDirectory: '/home/ec2-user/app',
-                                execCommand: 'java Hello'
-                            )
-                        ]
-                    )
-                ])
+                script {
+                    // Build Docker image from Dockerfile
+                    sh 'docker build -t jenkins-demo:latest .'
+                }
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                withCredentials([[$class: 'UsernamePasswordMultiBinding',
+                    credentialsId: 'aws-ecr-creds',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh '''
+                    aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+                    aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+                    aws configure set default.region eu-north-1
+                    aws ecr get-login-password --region eu-north-1 \
+                    | docker login --username AWS --password-stdin 579017679500.dkr.ecr.eu-north-1.amazonaws.com
+                    '''
+                }
+            }
+        }
+
+        stage('Tag & Push to ECR') {
+            steps {
+                script {
+                    sh '''
+                    docker tag jenkins-demo:latest 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
+                    docker push 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
+                    '''
+                }
             }
         }
     }
