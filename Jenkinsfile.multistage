@@ -1,0 +1,48 @@
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/deekshitha2610/jenkins-demo.git'
+            }
+        }
+
+        stage('Verify Workspace') {
+            steps {
+                bat 'dir'
+            }
+        }
+
+        stage('Build Multi-Stage Docker Image') {
+            steps {
+                bat 'docker build -f Dockerfile.multistage -t jenkins-demo-multistage:latest .'
+            }
+        }
+
+        stage('Run Container') {
+            steps {
+                bat '''
+                docker stop jenkins-demo-multistage >nul 2>&1
+                docker rm jenkins-demo-multistage >nul 2>&1
+                docker run --name jenkins-demo-multistage jenkins-demo-multistage:latest
+                '''
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                bat 'docker images'
+                bat 'docker ps -a'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Multi-stage Docker build completed successfully.'
+        }
+    }
+}
