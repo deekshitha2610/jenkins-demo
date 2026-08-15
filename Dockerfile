@@ -1,14 +1,9 @@
-# Use official OpenJDK image
-FROM eclipse-temurin:17-jdk
+FROM tomcat:9.0-jdk17-temurin
 
-# Set working directory inside container
-WORKDIR /app
+RUN rm -rf /usr/local/tomcat/webapps/*
 
-# Copy your Java source file
-COPY Hello.java /app
+COPY target/helloworld-1.0-SNAPSHOT.war /usr/local/tomcat/webapps/helloworld.war
 
-# Compile the Java file inside the container
-RUN javac Hello.java
+EXPOSE 8080
 
-# Run the program when container starts
-CMD ["java", "Hello"]
+CMD ["catalina.sh", "run"]
