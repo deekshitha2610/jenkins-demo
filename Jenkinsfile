@@ -4,9 +4,17 @@ pipeline {
     environment {
         AWS_REGION = 'us-east-1'
         AWS_ACCOUNT_ID = '579017679500'
-        ECR_REPO = 'helloworld'
-        ECR_URI = '579017679500.dkr.ecr.us-east-1.amazonaws.com/helloworld'
+
         EKS_CLUSTER = 'my-eks-cluster'
+
+        ECR_REPOSITORY = 'helloworld'
+        IMAGE_TAG = 'latest'
+        IMAGE_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+        // Maven installed on your Windows machine
+        MAVEN_HOME = 'C:\\Users\\hp\\Downloads\\apache-maven-3.10.0-rc-1-bin\\apache-maven-3.10.0-rc-1'
+
+        KUBECONFIG = "${WORKSPACE}\\kubeconfig"
     }
 
     stages {
@@ -15,91 +23,180 @@ pipeline {
             steps {
                 bat '''
                     echo ===== Checking Tools =====
+
                     aws --version
                     kubectl version --client
                     docker --version
-                    mvn -version
                     git --version
+
+                    echo ===== Checking Maven =====
+                    "%MAVEN_HOME%\\bin\\mvn.cmd" -version
+
+                    echo ===== Checking Java =====
+                    java -version
                 '''
             }
         }
 
         stage('Checkout') {
             steps {
+                echo '===== Checking out source code ====='
                 checkout scm
+
+                bat '''
+                    echo ===== Repository Contents =====
+                    dir
+                '''
             }
         }
 
         stage('Build Java Application') {
             steps {
+                echo '===== Building Java application ====='
+
                 bat '''
-                    echo ===== Building Java Application =====
-                    mvn clean package -DskipTests
+                    "%MAVEN_HOME%\\bin\\mvn.cmd" clean package -DskipTests
                 '''
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Verify WAR') {
             steps {
                 bat '''
-                    echo ===== Building Docker Image =====
-                    docker build -t %ECR_URI%:latest .
+                    echo ===== Checking generated WAR =====
+                    dir target
+
+                    if not exist "target\\*.war" (
+                        echo ERROR: WAR file was not generated.
+                        exit /b 1
+                    )
+
+                    echo WAR file generated successfully.
                 '''
             }
         }
 
-        stage('Login to ECR') {
+        stage('Configure AWS') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'aws-ecr-creds',
-                    usernameVariable: 'AWS_ACCESS_KEY_ID',
-                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
                     bat '''
-                        echo ===== Logging into AWS ECR =====
+                        echo ===== Configuring AWS credentials =====
 
                         set AWS_DEFAULT_REGION=%AWS_REGION%
 
-                        aws configure set aws_access_key_id %AWS_ACCESS_KEY_ID%
-                        aws configure set aws_secret_access_key %AWS_SECRET_ACCESS_KEY%
-                        aws configure set default.region %AWS_REGION%
-
                         aws sts get-caller-identity
 
-                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+                        echo AWS account and credentials verified.
                     '''
                 }
             }
         }
 
+        stage('Login to ECR') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo ===== Logging into ECR =====
+
+                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+
+                        if errorlevel 1 (
+                            echo ERROR: Docker login to ECR failed.
+                            exit /b 1
+                        )
+
+                        echo ECR login successful.
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo '===== Building Docker image ====='
+
+                bat '''
+                    docker build -t %IMAGE_URI% .
+
+                    if errorlevel 1 (
+                        echo ERROR: Docker image build failed.
+                        exit /b 1
+                    )
+
+                    docker images %IMAGE_URI%
+                '''
+            }
+        }
+
         stage('Push Docker Image') {
             steps {
-                bat '''
-                    echo ===== Pushing Docker Image =====
-                    docker push %ECR_URI%:latest
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo ===== Pushing Docker image to ECR =====
+
+                        docker push %IMAGE_URI%
+
+                        if errorlevel 1 (
+                            echo ERROR: Docker push failed.
+                            exit /b 1
+                        )
+
+                        echo Docker image pushed successfully.
+                    '''
+                }
             }
         }
 
         stage('Configure kubectl') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'aws-ecr-creds',
-                    usernameVariable: 'AWS_ACCESS_KEY_ID',
-                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
                     bat '''
-                        echo ===== Configuring kubectl =====
+                        echo ===== Configuring kubectl for EKS =====
 
-                        set AWS_DEFAULT_REGION=%AWS_REGION%
+                        if exist "%KUBECONFIG%" del /f /q "%KUBECONFIG%"
 
-                        aws configure set aws_access_key_id %AWS_ACCESS_KEY_ID%
-                        aws configure set aws_secret_access_key %AWS_SECRET_ACCESS_KEY%
-                        aws configure set default.region %AWS_REGION%
+                        aws eks update-kubeconfig ^
+                            --region %AWS_REGION% ^
+                            --name %EKS_CLUSTER% ^
+                            --kubeconfig "%KUBECONFIG%"
 
-                        aws eks update-kubeconfig --region %AWS_REGION% --name %EKS_CLUSTER%
+                        if errorlevel 1 (
+                            echo ERROR: Failed to configure kubeconfig.
+                            exit /b 1
+                        )
 
-                        kubectl get nodes
+                        echo ===== Checking EKS connection =====
+
+                        kubectl --kubeconfig "%KUBECONFIG%" get nodes
+
+                        if errorlevel 1 (
+                            echo ERROR: Cannot connect to EKS.
+                            exit /b 1
+                        )
                     '''
                 }
             }
@@ -107,30 +204,129 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                bat '''
-                    echo ===== Deploying to EKS =====
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo ===== Deploying Java application to EKS =====
 
-                    kubectl apply -f deploymentjava.yaml
-                    kubectl apply -f servicelb.yaml
+                        echo Applying Deployment...
+                        kubectl --kubeconfig "%KUBECONFIG%" apply -f deploymentjava.yaml
 
-                    kubectl set image deployment/java-app java-app=%ECR_URI%:latest
+                        if errorlevel 1 (
+                            echo ERROR: Deployment manifest failed.
+                            exit /b 1
+                        )
 
-                    kubectl rollout status deployment/java-app --timeout=180s
-                '''
+                        echo Applying LoadBalancer Service...
+                        kubectl --kubeconfig "%KUBECONFIG%" apply -f servicelb.yaml
+
+                        if errorlevel 1 (
+                            echo ERROR: Service manifest failed.
+                            exit /b 1
+                        )
+
+                        echo ===== Deployment applied successfully =====
+                    '''
+                }
+            }
+        }
+
+        stage('Update Image') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo ===== Updating deployment image =====
+
+                        kubectl --kubeconfig "%KUBECONFIG%" set image deployment/java-app java-app=%IMAGE_URI%
+
+                        if errorlevel 1 (
+                            echo ERROR: Failed to update deployment image.
+                            exit /b 1
+                        )
+
+                        echo Image updated successfully.
+                    '''
+                }
+            }
+        }
+
+        stage('Wait for Rollout') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo ===== Waiting for rollout =====
+
+                        kubectl --kubeconfig "%KUBECONFIG%" rollout status deployment/java-app --timeout=180s
+
+                        if errorlevel 1 (
+                            echo ERROR: Deployment rollout failed.
+                            kubectl --kubeconfig "%KUBECONFIG%" get pods -o wide
+                            kubectl --kubeconfig "%KUBECONFIG%" describe deployment java-app
+                            exit /b 1
+                        }
+
+                        echo Rollout completed successfully.
+                    '''
+                }
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                bat '''
-                    echo ===== Deployment Status =====
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        echo.
+                        echo ==========================================
+                        echo Kubernetes Deployment
+                        echo ==========================================
 
-                    kubectl get deployment
-                    kubectl get pods -o wide
-                    kubectl get svc java-app-service
+                        kubectl --kubeconfig "%KUBECONFIG%" get deployment java-app
 
-                    kubectl describe deployment java-app
-                '''
+                        echo.
+                        echo ==========================================
+                        echo Pods
+                        echo ==========================================
+
+                        kubectl --kubeconfig "%KUBECONFIG%" get pods -o wide
+
+                        echo.
+                        echo ==========================================
+                        echo Service
+                        echo ==========================================
+
+                        kubectl --kubeconfig "%KUBECONFIG%" get svc java-app-service
+
+                        echo.
+                        echo ==========================================
+                        echo Endpoints
+                        echo ==========================================
+
+                        kubectl --kubeconfig "%KUBECONFIG%" get endpoints java-app-service
+                    '''
+                }
             }
         }
     }
@@ -141,8 +337,12 @@ pipeline {
             ==========================================
             PIPELINE SUCCESS
             ==========================================
+
+            Java application built successfully.
             Docker image pushed to ECR.
             Application deployed to EKS.
+            Kubernetes rollout completed successfully.
+
             ==========================================
             '''
         }
@@ -152,9 +352,15 @@ pipeline {
             ==========================================
             PIPELINE FAILED
             ==========================================
-            Check the failed stage and Console Output.
+
+            Check the failed stage and console output.
+
             ==========================================
             '''
+        }
+
+        always {
+            echo 'Pipeline execution completed.'
         }
     }
 }
