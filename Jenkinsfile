@@ -1,70 +1,160 @@
 pipeline {
     agent any
 
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = '579017679500'
+        ECR_REPO = 'helloworld'
+        ECR_URI = '579017679500.dkr.ecr.us-east-1.amazonaws.com/helloworld'
+        EKS_CLUSTER = 'my-eks-cluster'
+    }
+
     stages {
+
+        stage('Check Tools') {
+            steps {
+                bat '''
+                    echo ===== Checking Tools =====
+                    aws --version
+                    kubectl version --client
+                    docker --version
+                    mvn -version
+                    git --version
+                '''
+            }
+        }
+
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Build Java App') {
+        stage('Build Java Application') {
             steps {
-                bat 'javac Hello.java'
+                bat '''
+                    echo ===== Building Java Application =====
+                    mvn clean package -DskipTests
+                '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                bat 'docker build -t jenkins-demo:latest .'
+                bat '''
+                    echo ===== Building Docker Image =====
+                    docker build -t %ECR_URI%:latest .
+                '''
             }
         }
 
         stage('Login to ECR') {
             steps {
-                withCredentials([[$class: 'UsernamePasswordMultiBinding',
+                withCredentials([usernamePassword(
                     credentialsId: 'aws-ecr-creds',
                     usernameVariable: 'AWS_ACCESS_KEY_ID',
-                    passwordVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
                     bat '''
-                    aws configure set aws_access_key_id %AWS_ACCESS_KEY_ID%
-                    aws configure set aws_secret_access_key %AWS_SECRET_ACCESS_KEY%
-                    aws configure set default.region eu-north-1
-                    for /f "tokens=*" %%i in ('aws ecr get-login-password --region eu-north-1') do docker login --username AWS --password %%i 579017679500.dkr.ecr.eu-north-1.amazonaws.com
+                        echo ===== Logging into AWS ECR =====
+
+                        set AWS_DEFAULT_REGION=%AWS_REGION%
+
+                        aws configure set aws_access_key_id %AWS_ACCESS_KEY_ID%
+                        aws configure set aws_secret_access_key %AWS_SECRET_ACCESS_KEY%
+                        aws configure set default.region %AWS_REGION%
+
+                        aws sts get-caller-identity
+
+                        aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
                     '''
                 }
             }
         }
 
-        stage('Tag & Push to ECR') {
+        stage('Push Docker Image') {
             steps {
                 bat '''
-                docker tag jenkins-demo:latest 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
-                docker push 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
+                    echo ===== Pushing Docker Image =====
+                    docker push %ECR_URI%:latest
                 '''
             }
         }
 
-        stage('Deploy to EC2') {
+        stage('Configure kubectl') {
             steps {
-                sshPublisher(publishers: [
-                    sshPublisherDesc(
-                        configName: 'ec2-ssh',
-                        transfers: [
-                            sshTransfer(
-                                execCommand: '''
-                                aws ecr get-login-password --region eu-north-1 \
-                                | docker login --username AWS --password-stdin 579017679500.dkr.ecr.eu-north-1.amazonaws.com
-                                docker pull 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
-                                docker stop jenkins-demo || true
-                                docker rm jenkins-demo || true
-                                docker run -d --name jenkins-demo 579017679500.dkr.ecr.eu-north-1.amazonaws.com/jenkins-demo-repo:latest
-                                '''
-                            )
-                        ]
-                    )
-                ])
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-ecr-creds',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    bat '''
+                        echo ===== Configuring kubectl =====
+
+                        set AWS_DEFAULT_REGION=%AWS_REGION%
+
+                        aws configure set aws_access_key_id %AWS_ACCESS_KEY_ID%
+                        aws configure set aws_secret_access_key %AWS_SECRET_ACCESS_KEY%
+                        aws configure set default.region %AWS_REGION%
+
+                        aws eks update-kubeconfig --region %AWS_REGION% --name %EKS_CLUSTER%
+
+                        kubectl get nodes
+                    '''
+                }
             }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                bat '''
+                    echo ===== Deploying to EKS =====
+
+                    kubectl apply -f deploymentjava.yaml
+                    kubectl apply -f servicelb.yaml
+
+                    kubectl set image deployment/java-app java-app=%ECR_URI%:latest
+
+                    kubectl rollout status deployment/java-app --timeout=180s
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                bat '''
+                    echo ===== Deployment Status =====
+
+                    kubectl get deployment
+                    kubectl get pods -o wide
+                    kubectl get svc java-app-service
+
+                    kubectl describe deployment java-app
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+            ==========================================
+            PIPELINE SUCCESS
+            ==========================================
+            Docker image pushed to ECR.
+            Application deployed to EKS.
+            ==========================================
+            '''
+        }
+
+        failure {
+            echo '''
+            ==========================================
+            PIPELINE FAILED
+            ==========================================
+            Check the failed stage and Console Output.
+            ==========================================
+            '''
         }
     }
 }
